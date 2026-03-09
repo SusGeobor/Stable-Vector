@@ -123,6 +123,7 @@ public: // CONSTRUCTORS
 	{
 		pageCount = other.pageCount;
 		highWaterMark = other.highWaterMark;
+		elementCount = other.elementCount;
 		data = other.data;
 		endData = other.endData;
 		skipArray = other.skipArray;
@@ -141,6 +142,7 @@ public: // CONSTRUCTORS
 
 			pageCount = other.pageCount;
 			highWaterMark = other.highWaterMark;
+			elementCount = other.elementCount;
 			data = other.data;
 			endData = other.endData;
 			skipArray = other.skipArray;
@@ -434,6 +436,8 @@ private: // IMPLEMENTATION
 
 	void copyStableVector(const stableVector& other) noexcept
 	{
+		elementCount = other.elementCount;
+
 		allocate(other.elementCount);
 
 		for (const T& element : other)
