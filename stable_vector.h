@@ -2,8 +2,10 @@
 
 #include <type_traits>
 #include <algorithm>
+#include <iostream>
 #include <concepts>
 #include <cstdint>
+#include <new>
 
 #define NOMINMAX
 #include <Windows.h>
@@ -29,6 +31,9 @@ namespace gbr
 
 	template<class, size_t, Use_Generations_Concept, Const_Iterator_Concept>
 	class stableVectorIterator;
+
+	template<class KeyValue>
+	class RemapMap;
 
 	// STABLE VECTOR
 	template<class T, size_t elements, Use_Generations_Concept UseGenerations = no_generations>
@@ -81,7 +86,9 @@ namespace gbr
 		template<class, size_t, Use_Generations_Concept, Const_Iterator_Concept>
 		friend class stableVectorIterator;
 
+
 		constexpr static bool Generational = std::same_as<UseGenerations, use_generations>;
+
 
 		using Node = std::conditional_t<Generational, GenerationalNode, IndividualisticNode>;
 
@@ -91,25 +98,25 @@ namespace gbr
 		using ConstIterator = stableVectorIterator<T, elements, UseGenerations, is_const>;
 
 	public: // CONSTRUCTORS
-		stableVector() noexcept
+		stableVector()
 		{
 			allocate(1);
 		}
 
 
-		stableVector(size_t reserveElements) noexcept
+		stableVector(size_t reserveElements)
 		{
 			allocate(reserveElements);
 		}
 
 
-		stableVector(const stableVector& other) noexcept
+		stableVector(const stableVector& other)
 		{
 			copyStableVector(other);
 		}
 
 
-		stableVector& operator=(const stableVector& other) noexcept
+		stableVector& operator=(const stableVector& other)
 		{
 			if (this != &other)
 			{
@@ -140,7 +147,7 @@ namespace gbr
 		}
 
 
-		stableVector& operator=(stableVector&& other) noexcept
+		stableVector& operator=(stableVector&& other) noexcept(std::is_nothrow_destructible_v<T>)
 		{
 			if (this != &other)
 			{
@@ -163,26 +170,26 @@ namespace gbr
 		}
 
 
-		~stableVector() noexcept
+		~stableVector() noexcept(std::is_nothrow_destructible_v<T>)
 		{
 			deallocate();
 		}
 
 	public: // MEMBER FUNCTIONS, INSERT
-		ReturnHandle insert(const T& value) noexcept
+		ReturnHandle insert(const T& value)
 		{
 			return emplace(value);
 		}
 
 
-		ReturnHandle insert(T&& value) noexcept
+		ReturnHandle insert(T&& value)
 		{
 			return emplace(std::move(value));
 		}
 
 
 		template<class... Args>
-		ReturnHandle emplace(Args&&... args) noexcept
+		ReturnHandle emplace(Args&&... args)
 		{
 			Node* const slot = getAllocationSlot();
 
@@ -203,7 +210,7 @@ namespace gbr
 		}
 
 		// ERASE
-		void erase(T* value) noexcept
+		void erase(T* value) noexcept(std::is_nothrow_destructible_v<T>)
 		{
 			const size_t index = reinterpret_cast<Node*>(value) - data;
 
@@ -222,13 +229,13 @@ namespace gbr
 		}
 
 
-		Iterator erase(const Iterator& iterator) noexcept
+		Iterator erase(const Iterator& iterator) noexcept(std::is_nothrow_destructible_v<T>)
 		{
 			Iterator nextElement = iterator;
 			++nextElement;
 
 			iterator.data->value.~T();
-			::new(iterator.data) FreeListNode(freeList, { *(iterator.skipPtr - 1), *(iterator.skipPtr + 1) });
+			::new(iterator.data) FreeListNode(freeList, { iterator.skipPtr[-1], iterator.skipPtr[1] });
 			freeList = reinterpret_cast<FreeListNode*>(iterator.data);
 
 			if constexpr (Generational)
@@ -258,47 +265,64 @@ namespace gbr
 		}
 
 
-		[[nodiscard]] size_t& getGeneration(T* value) noexcept
+		[[nodiscard]] static bool isValid(T* value, size_t generation) noexcept
+			requires Generational
+		{
+			return reinterpret_cast<Node*>(value)->generation == generation;
+		}
+
+
+		[[nodiscard]] static size_t& getGeneration(T* value) noexcept
 			requires Generational
 		{
 			return reinterpret_cast<Node*>(value)->generation;
 		}
 
 
-		[[nodiscard]] const size_t& getGeneration(T* value) const noexcept
+		[[nodiscard]] static const size_t& getGeneration(const T* value) noexcept
 			requires Generational
 		{
 			return reinterpret_cast<const Node*>(value)->generation;
 		}
 
 
-		void reserve(size_t reserveElements) noexcept
+		void reserve(size_t reserveElements)
 		{
-			grow(align(reserveElements * sizeof(Node), OS_PAGE_INFO::pageSize) / OS_PAGE_INFO::pageSize);
+			if (const size_t newPageCount = align(reserveElements * sizeof(Node), OS_PAGE_INFO::pageSize) / OS_PAGE_INFO::pageSize; newPageCount > pageCount)
+			{
+				grow(newPageCount);
+			}
 		}
 
 
-		void compress() noexcept // implement remap, intended to break pointer stability
+		[[nodiscard]] RemapMap<T*> compress() // Intended to break pointer stability
 		{
+			RemapMap<T*> remapMap;
+
 			size_t lastIndex = 0;
 
 			if (elementCount)
 			{
 				lastIndex = cback().data - data;
 
+				remapMap.allocate(std::bit_ceil((lastIndex + 1) - elementCount) * 2);
+
 				for (size_t currentIndex = 0; currentIndex < lastIndex; ++currentIndex)
 				{
 					if (skipArray[currentIndex + 1])
 					{
 						::new(data + currentIndex) T(std::move(*reinterpret_cast<T*>(data + lastIndex)));
-						reinterpret_cast<T*>(data + lastIndex)->~T();
 
 						if constexpr (Generational)
 						{
-							++(data[currentIndex].generation);
+							data[currentIndex].generation = data[lastIndex].generation;
 						}
 
-						while (skipArray[--lastIndex + 1]) {}
+						reinterpret_cast<T*>(data + lastIndex)->~T();
+
+						remapMap.insert(reinterpret_cast<T*>(data + lastIndex), reinterpret_cast<T*>(data + currentIndex));
+
+						while (skipArray[--lastIndex + 1] && lastIndex > currentIndex) {}
 					}
 				}
 
@@ -316,11 +340,13 @@ namespace gbr
 			{
 				for (size_t currentIndex = highWaterMark; data + currentIndex != endData; ++currentIndex)
 				{
-					::new(data + currentIndex) Node({ FreeListNode{ 0 }, 0 });
+					::new(data + currentIndex) Node({ 0 });
 				}
 			}
 
 			memset(skipArray, 0, getSkipArrayBytes());
+
+			return remapMap;
 		}
 
 
@@ -331,6 +357,7 @@ namespace gbr
 			if (elementCount)
 			{
 				index = cback().data - data;
+
 				decommitPages(index);
 
 				FreeListNode* toPointTo = nullptr;
@@ -338,7 +365,7 @@ namespace gbr
 				{
 					if constexpr (Generational)
 					{
-						::new(data + currentIndex) Node({ FreeListNode{ 0 }, 0 });
+						::new(data + currentIndex) Node({ 0 });
 					}
 
 					skipArray[currentIndex + 1] = 0;
@@ -425,7 +452,7 @@ namespace gbr
 		}
 
 	private: // IMPLEMENTATION
-		void allocate(size_t reserveElements) noexcept
+		void allocate(size_t reserveElements)
 		{
 			[[maybe_unused]] static const bool _ = []() noexcept -> bool
 			{
@@ -450,13 +477,27 @@ namespace gbr
 
 			data = static_cast<Node*>(VirtualAlloc(NULL, reservedBytes, MEM_RESERVE, PAGE_READWRITE));
 			skipArray = static_cast<uint32_t*>(VirtualAlloc(NULL, skipReservedBytes, MEM_RESERVE, PAGE_READWRITE));
-			VirtualAlloc(data, reserveSize, MEM_COMMIT, PAGE_READWRITE);
-			VirtualAlloc(skipArray, skipReserveSize, MEM_COMMIT, PAGE_READWRITE);
+
+			if (!data || !skipArray)
+			{
+				goto FAIL;
+			}
+			if (!VirtualAlloc(data, reserveSize, MEM_COMMIT, PAGE_READWRITE) ||
+				!VirtualAlloc(skipArray, skipReserveSize, MEM_COMMIT, PAGE_READWRITE))
+			{
+				goto FAIL;
+			}
+
 			endData = data + (reserveSize / sizeof(Node));
+
+			return;
+
+		FAIL:
+			throw std::bad_alloc();
 		}
 
 
-		void copyStableVector(const stableVector& other) noexcept
+		void copyStableVector(const stableVector& other)
 		{
 			elementCount = other.elementCount;
 
@@ -476,17 +517,21 @@ namespace gbr
 		}
 
 
-		void deallocate() noexcept
+		void deallocate() noexcept(std::is_nothrow_destructible_v<T>)
 		{
 			if (data)
 			{
-				for (T& i : *(this))
+				for (T& item : *(this))
 				{
-					i.~T();
+					item.~T();
 				}
 
-				VirtualFree(data, 0, MEM_RELEASE);
-				VirtualFree(skipArray, 0, MEM_RELEASE);
+				if (!VirtualFree(data, 0, MEM_RELEASE) ||
+					!VirtualFree(skipArray, 0, MEM_RELEASE))
+				{
+					std::cerr << "VirtualFree failed\n";
+					std::terminate();
+				}
 			}
 		}
 
@@ -511,15 +556,34 @@ namespace gbr
 			pageCount = pagesUsed;
 
 			const size_t skipArrayBytes = getSkipArrayBytes();
+			const size_t skipArrayBytesToDecommit = (prevSkipArrayBytes - skipArrayBytes);
 
-			VirtualFree(reinterpret_cast<char*>(data) + bytesUsed, bytesToDecommit, MEM_DECOMMIT);
-			VirtualFree(reinterpret_cast<char*>(skipArray) + skipArrayBytes, prevSkipArrayBytes - skipArrayBytes, MEM_DECOMMIT);
+			if (bytesToDecommit)
+			{
+				if (!VirtualFree(reinterpret_cast<char*>(data) + bytesUsed, bytesToDecommit, MEM_DECOMMIT))
+				{
+					goto FAIL;
+				}
+			}
+			if (skipArrayBytesToDecommit)
+			{
+				if (!VirtualFree(reinterpret_cast<char*>(skipArray) + skipArrayBytes, skipArrayBytesToDecommit, MEM_DECOMMIT))
+				{
+					goto FAIL;
+				}
+			}
 
 			endData = data + (bytesUsed / sizeof(Node));
+
+			return;
+
+		FAIL:
+			std::cerr << "VirtualFree failed, Error Code: " << GetLastError() << '\n';
+			std::terminate();
 		}
 
 
-		[[nodiscard]] Node* getAllocationSlot() noexcept
+		[[nodiscard]] Node* getAllocationSlot()
 		{
 			if (freeList)
 			{
@@ -543,13 +607,16 @@ namespace gbr
 		}
 
 
-		void grow(size_t newPageCount) noexcept
+		void grow(size_t newPageCount)
 		{
 			pageCount = std::min(newPageCount, reservedBytes / OS_PAGE_INFO::pageSize);
 			endData = data + (pageCount * OS_PAGE_INFO::pageSize / sizeof(Node));
 
-			VirtualAlloc(data, pageCount * OS_PAGE_INFO::pageSize, MEM_COMMIT, PAGE_READWRITE);
-			VirtualAlloc(skipArray, getSkipArrayBytes(), MEM_COMMIT, PAGE_READWRITE);
+			if (!VirtualAlloc(data, pageCount * OS_PAGE_INFO::pageSize, MEM_COMMIT, PAGE_READWRITE) ||
+				!VirtualAlloc(skipArray, getSkipArrayBytes(), MEM_COMMIT, PAGE_READWRITE))
+			{
+				throw std::bad_alloc();
+			}
 		}
 
 
@@ -568,32 +635,39 @@ namespace gbr
 		}
 
 
-		void updateSkipArray(uint32_t* currentSkipNode) noexcept
+		void updateSkipArray(uint32_t* currentSkipNodePtr) noexcept
 		{
-			if (*(currentSkipNode + 1))
+			const uint32_t leftSkipSize = currentSkipNodePtr[-1];
+			uint32_t& currentSkipNode = currentSkipNodePtr[0];
+			const uint32_t rightSkipSize = currentSkipNodePtr[1];
+
+			if (leftSkipSize)
 			{
-				if (*(currentSkipNode - 1))
+				if (rightSkipSize)
 				{
-					const uint32_t totalSkipSize = *(currentSkipNode + 1) + *(currentSkipNode - 1) + 1;
-					const uint32_t rightSkipSize = *(currentSkipNode + 1);
-					const uint32_t leftSkipSize = *(currentSkipNode - 1);
-					*(currentSkipNode + rightSkipSize) = totalSkipSize;
-					*(currentSkipNode - leftSkipSize) = totalSkipSize;
+					const uint32_t newSkipSize = leftSkipSize + rightSkipSize + 1;
+
+					currentSkipNodePtr[rightSkipSize] = newSkipSize;
+					*(currentSkipNodePtr - leftSkipSize) = newSkipSize;
+
 					return;
 				}
-				const uint32_t newSkipSize = *(currentSkipNode + 1);
-				*currentSkipNode = newSkipSize + 1;
-				*(currentSkipNode + newSkipSize) = newSkipSize + 1;
+
+				const uint32_t newSkipSize = leftSkipSize;
+
+				currentSkipNode = newSkipSize + 1;
+				*(currentSkipNodePtr - newSkipSize) = newSkipSize + 1;
 			}
-			else if (*(currentSkipNode - 1))
+			else if (rightSkipSize)
 			{
-				const uint32_t newSkipSize = *(currentSkipNode - 1);
-				*currentSkipNode = newSkipSize + 1;
-				*(currentSkipNode - newSkipSize) = newSkipSize + 1;
+				const uint32_t newSkipSize = rightSkipSize;
+
+				currentSkipNode = newSkipSize + 1;
+				currentSkipNodePtr[newSkipSize] = newSkipSize + 1;
 			}
 			else
 			{
-				*currentSkipNode = 1;
+				currentSkipNode = 1;
 			}
 		}
 
@@ -621,6 +695,7 @@ namespace gbr
 	{
 		template<class, size_t, Use_Generations_Concept>
 		friend class stableVector;
+
 
 		inline static size_t pageSize;
 
@@ -723,5 +798,171 @@ namespace gbr
 	private:
 		DataValueType data;
 		SkipValueType skipPtr;
+	};
+
+	// Simplified, never needs to grow or make checks
+	template<class KeyValue>
+	class RemapMap
+	{
+	private:
+		struct RemapNode
+		{
+			int64_t psl = -1;
+			KeyValue key = KeyValue{};
+			KeyValue value = KeyValue{};
+
+			[[nodiscard]] bool isEmpty() const { return psl == -1; };
+		};
+
+	private:
+		RemapMap() noexcept = default;
+
+	public:
+		RemapMap(const RemapMap& other)
+		{
+			size = other.size;
+
+			data = static_cast<RemapNode*>(::operator new(other.size * sizeof(RemapNode), std::alignment_of<RemapNode>::value));
+			memcpy(data, other.data, size * sizeof(RemapNode));
+		}
+
+
+		RemapMap& operator=(const RemapMap& other)
+		{
+			if (this != &other)
+			{
+				::operator delete(data, size * sizeof(RemapNode), std::alignment_of<RemapNode>::value);
+
+				size = other.size;
+
+				data = static_cast<RemapNode*>(::operator new(other.size * sizeof(RemapNode), std::alignment_of<RemapNode>::value));
+				memcpy(data, other.data, size * sizeof(RemapNode));
+			}
+
+			return *this;
+		}
+
+
+		RemapMap(RemapMap&& other) noexcept
+		{
+			data = other.data;
+			size = other.size;
+
+			other.data = nullptr;
+			other.size = 0;
+		}
+
+
+		RemapMap& operator=(RemapMap&& other) noexcept
+		{
+			if (this != &other)
+			{
+				::operator delete(data, size * sizeof(RemapNode), std::align_val_t(std::alignment_of<RemapNode>::value));
+
+				data = other.data;
+				size = other.size;
+
+				other.data = nullptr;
+				other.size = 0;
+			}
+
+			return *this;
+		}
+
+
+		~RemapMap() noexcept
+		{
+			::operator delete(data, size * sizeof(RemapNode), std::align_val_t(std::alignment_of<RemapNode>::value));
+		}
+
+	private:
+		void allocate(size_t elementCount)
+		{
+			size = elementCount;
+
+			data = static_cast<RemapNode*>(::operator new(size * sizeof(RemapNode), std::align_val_t(std::alignment_of<RemapNode>::value)));
+			
+			for (size_t index = 0; index != size; ++index)
+			{
+				data[index] = RemapNode{ -1, KeyValue{}, KeyValue{}};
+			}
+		}
+
+
+		void insert(KeyValue key, KeyValue value)
+		{
+			size_t index = std::hash<KeyValue>()(key) & (size - 1);
+			int64_t psl = 0;
+
+			while (true)
+			{
+				if (data[index].isEmpty())
+				{
+					data[index].psl = psl;
+					data[index].key = key;
+					data[index].value = value;
+
+					return;
+				}
+				else if (psl > data[index].psl)
+				{
+					std::swap(psl, data[index].psl);
+					std::swap(key, data[index].key);
+					std::swap(value, data[index].value);
+				}
+
+				++psl;
+				++index;
+
+				if (index == size)
+				{
+					index = 0;
+				}
+			}
+		}
+
+	public:
+		[[nodiscard]] KeyValue find(KeyValue key) const
+		{
+			size_t start = std::hash<KeyValue>()(key) & (size - 1);
+			size_t index = start;
+			int64_t psl = 0;
+
+			while (key != data[index].key)
+			{
+				if (psl > data[index].psl)
+				{
+					return KeyValue{};
+				}
+
+				++psl;
+				++index;
+
+				if (index == size)
+				{
+					index = 0;
+				}
+				if (index == start)
+				{
+					return KeyValue{};
+				}
+			}
+
+			return data[index].value;
+		}
+
+
+		[[nodiscard]] bool isEmpty() const noexcept
+		{
+			return !size;
+		}
+
+	private:
+		template<class, size_t, Use_Generations_Concept>
+		friend class stableVector;
+
+
+		RemapNode* data = nullptr;
+		size_t size = 0;
 	};
 }
