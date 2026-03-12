@@ -5,6 +5,7 @@
 #include <iostream>
 #include <concepts>
 #include <cstdint>
+#include <bit>
 #include <new>
 
 #define NOMINMAX
@@ -126,7 +127,7 @@ namespace gbr
 
 				copyStableVector(other);
 			}
-		
+
 			return *this;
 		}
 
@@ -215,7 +216,7 @@ namespace gbr
 			const size_t index = reinterpret_cast<Node*>(value) - data;
 
 			data[index].value.~T();
-			::new(data + index) FreeListNode(freeList, { skipArray[index], skipArray[index + 2] });
+			::new(data + index) FreeListNode{ freeList, { skipArray[index], skipArray[index + 2] } };
 			freeList = reinterpret_cast<FreeListNode*>(data + index);
 
 			if constexpr (Generational)
@@ -235,7 +236,7 @@ namespace gbr
 			++nextElement;
 
 			iterator.data->value.~T();
-			::new(iterator.data) FreeListNode(freeList, { iterator.skipPtr[-1], iterator.skipPtr[1] });
+			::new(iterator.data) FreeListNode{ freeList, { iterator.skipPtr[-1], iterator.skipPtr[1] } };
 			freeList = reinterpret_cast<FreeListNode*>(iterator.data);
 
 			if constexpr (Generational)
@@ -340,7 +341,7 @@ namespace gbr
 			{
 				for (size_t currentIndex = highWaterMark; data + currentIndex != endData; ++currentIndex)
 				{
-					::new(data + currentIndex) Node({ 0 });
+					::new(data + currentIndex) Node{};
 				}
 			}
 
@@ -365,7 +366,7 @@ namespace gbr
 				{
 					if constexpr (Generational)
 					{
-						::new(data + currentIndex) Node({ 0 });
+						::new(data + currentIndex) Node{};
 					}
 
 					skipArray[currentIndex + 1] = 0;
@@ -408,9 +409,7 @@ namespace gbr
 
 		[[nodiscard]] Iterator back() noexcept
 		{
-			Iterator toReturn(data + highWaterMark, skipArray + highWaterMark + 1);
-
-			return  elementCount ? --toReturn : toReturn;
+			return --Iterator(data + highWaterMark, skipArray + highWaterMark + 1);
 		}
 
 
@@ -428,9 +427,7 @@ namespace gbr
 
 		[[nodiscard]] ConstIterator back() const noexcept
 		{
-			ConstIterator toReturn(data + highWaterMark, skipArray + highWaterMark + 1);
-
-			return  elementCount ? --toReturn : toReturn;
+			return --ConstIterator(data + highWaterMark, skipArray + highWaterMark + 1);
 		}
 
 
@@ -455,18 +452,18 @@ namespace gbr
 		void allocate(size_t reserveElements)
 		{
 			[[maybe_unused]] static const bool _ = []() noexcept -> bool
-			{
-				OS_PAGE_INFO::getSystemPageData();
+				{
+					OS_PAGE_INFO::getSystemPageData();
 
-				reservedBytes = elements * sizeof(Node);
-				skipReservedBytes = (elements + 2) * sizeof(uint32_t);
-				reservedBytes = align(reservedBytes, OS_PAGE_INFO::pageSize);
-				skipReservedBytes = align(skipReservedBytes, OS_PAGE_INFO::pageSize);
+					reservedBytes = elements * sizeof(Node);
+					skipReservedBytes = (elements + 2) * sizeof(uint32_t);
+					reservedBytes = align(reservedBytes, OS_PAGE_INFO::pageSize);
+					skipReservedBytes = align(skipReservedBytes, OS_PAGE_INFO::pageSize);
 
-				return false;
-			}();
+					return false;
+				}();
 
-			reserveElements = std::clamp(reserveElements, 1UZ, elements);
+			reserveElements = std::clamp(reserveElements, 1ULL, elements);
 
 			size_t reserveSize = reserveElements * sizeof(Node);
 			size_t skipReserveSize = (reserveElements + 2) * sizeof(uint32_t);
@@ -703,13 +700,13 @@ namespace gbr
 		static void getSystemPageData()
 		{
 			[[maybe_unused]] static const bool _ = []() noexcept -> bool
-			{
-				SYSTEM_INFO systemInfo;
-				GetSystemInfo(&systemInfo);
-				pageSize = static_cast<size_t>(systemInfo.dwPageSize);
+				{
+					SYSTEM_INFO systemInfo;
+					GetSystemInfo(&systemInfo);
+					pageSize = static_cast<size_t>(systemInfo.dwPageSize);
 
-				return false;
-			}();
+					return false;
+				}();
 		}
 	};
 
@@ -881,10 +878,10 @@ namespace gbr
 			size = elementCount;
 
 			data = static_cast<RemapNode*>(::operator new(size * sizeof(RemapNode), std::align_val_t(std::alignment_of<RemapNode>::value)));
-			
+
 			for (size_t index = 0; index != size; ++index)
 			{
-				data[index] = RemapNode{ -1, KeyValue{}, KeyValue{}};
+				data[index] = RemapNode{ -1, KeyValue{}, KeyValue{} };
 			}
 		}
 
