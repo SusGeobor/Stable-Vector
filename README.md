@@ -29,10 +29,17 @@ O(1) validity checks
 Q: vs plf::colony?
 
 A:Very rough tests showed:
+
 iteration 2% - 30% faster
+
 insert 30% faster - 20% slower (will try to improve)
+
 erase 100% - 150% faster
+
 allocation 15% - 30% faster (may improve)
+
 validating handles; colony cannot validate handles in O(1) time. this container tends to be an order of magnitude or a few orders of magnitude faster here. This was a deliberate choice, by making it contiguous and reuse slots rather than shrink, validity always requires 1 O(1) check.
+
 Lookup performance, both 1 indirection, direct pointer lookups
+
 handle size, 4 bytes without generations, 8 bytes with generations. Colony handles are 24 bytes.
