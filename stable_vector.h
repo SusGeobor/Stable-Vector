@@ -19,6 +19,8 @@ namespace gbr
 	struct not_const {};
 	struct use_generations {};
 	struct no_generations {};
+	struct branchless {};
+	struct branched {};
 	struct return_map {};
 	struct no_map {};
 
@@ -32,13 +34,38 @@ namespace gbr
 	template<class T>
 	concept ReturnRemapMapConcept = std::same_as<T, return_map> || std::same_as<T, no_map>;
 
-	template<class, size_t, UseGenerationsConcept, ConstIteratorConcept>
+	template<class T>
+	concept IteratorBranchConcept = std::same_as<T, branchless> || std::same_as<T, branched>;
+
+
+	template<class, size_t, UseGenerationsConcept, ConstIteratorConcept, IteratorBranchConcept t_branched = branchless>
 	class stableVectorIterator;
 
 	template<class>
 	class RemapMap;
 
-	class OS_PAGE_INFO;
+
+	namespace details
+	{
+		template<class, size_t, UseGenerationsConcept, ConstIteratorConcept, IteratorBranchConcept>
+		class stableVectorIteratorBase;
+
+
+		inline size_t OS_PAGE_SIZE;
+
+
+		inline void getSystemPageData()
+		{
+			[[maybe_unused]] static const bool _ = []() noexcept -> bool
+				{
+					SYSTEM_INFO systemInfo;
+					GetSystemInfo(&systemInfo);
+					OS_PAGE_SIZE = static_cast<size_t>(systemInfo.dwPageSize);
+
+					return false;
+				}();
+		}
+	}
 
 
 
@@ -93,8 +120,10 @@ namespace gbr
 		};
 
 	private: // MEMBER ALIASES
-		template<class, size_t, UseGenerationsConcept, ConstIteratorConcept>
-		friend class stableVectorIterator;
+		template<class, size_t, UseGenerationsConcept, ConstIteratorConcept, IteratorBranchConcept>
+		friend class details::stableVectorIteratorBase;
+
+
 
 
 		constexpr static bool c_generational = std::same_as<t_useGenerations, use_generations>;
@@ -104,8 +133,10 @@ namespace gbr
 
 	public:
 		using Handle = std::conditional_t<c_generational, GenerationalHandle, IndividualisticHandle>;
-		using Iterator = stableVectorIterator<T, t_VMReserveElements, t_useGenerations, not_const>;
-		using ConstIterator = stableVectorIterator<T, t_VMReserveElements, t_useGenerations, is_const>;
+		using Iterator = stableVectorIterator<T, t_VMReserveElements, t_useGenerations, not_const, branchless>;
+		using ConstIterator = stableVectorIterator<T, t_VMReserveElements, t_useGenerations, is_const, branchless>;
+		using BranchedIterator = stableVectorIterator<T, t_VMReserveElements, t_useGenerations, not_const, branched>;
+		using BranchedConstIterator = stableVectorIterator<T, t_VMReserveElements, t_useGenerations, is_const, branched>;
 
 	public: // CONSTRUCTORS
 		stableVector()
@@ -250,13 +281,13 @@ namespace gbr
 			Iterator nextElement = iterator;
 			++nextElement;
 
-			iterator.data->value.~T();
+			iterator.m_data->value.~T();
 
-			updateSkipArray(iterator.skipPtr - m_skipData);
+			updateSkipArray(iterator.m_skipPtr - m_skipData);
 
 			if constexpr (c_generational)
 			{
-				++(iterator.data->generation);
+				++(iterator.m_data->generation);
 			}
 
 			--m_size;
@@ -344,7 +375,7 @@ namespace gbr
 
 		void reserve(uint32_t reserveElements)
 		{
-			if (const uint32_t newPageCount = align(reserveElements * sizeof(Node), OS_PAGE_INFO::pageSize) / OS_PAGE_INFO::pageSize; newPageCount > m_pageCount)
+			if (const uint32_t newPageCount = align(reserveElements * sizeof(Node), details::OS_PAGE_SIZE) / details::OS_PAGE_SIZE; newPageCount > m_pageCount)
 			{
 				grow(newPageCount);
 			}
@@ -554,17 +585,75 @@ namespace gbr
 			return back();
 		}
 
+
+		[[nodiscard]] BranchedIterator beginBranched() noexcept
+		{
+			return BranchedIterator(m_data + m_skipData[1] + 1, m_skipData + m_skipData[1] + 1);
+		}
+
+
+		[[nodiscard]] BranchedIterator endBranched() noexcept
+		{
+			return BranchedIterator(m_data + m_highWaterMark + 1, m_skipData + m_highWaterMark + 1);
+		}
+
+
+		[[nodiscard]] BranchedIterator backBranched() noexcept
+		{
+			BranchedIterator toReturn(m_data + m_highWaterMark + 1, m_skipData + m_highWaterMark + 1);
+
+			return m_size ? --toReturn : toReturn;
+		}
+
+
+		[[nodiscard]] BranchedConstIterator beginBranched() const noexcept
+		{
+			return BranchedConstIterator(m_data + m_skipData[1] + 1, m_skipData + m_skipData[1] + 1);
+		}
+
+
+		[[nodiscard]] BranchedConstIterator endBranched() const noexcept
+		{
+			return BranchedConstIterator(m_data + m_highWaterMark + 1, m_skipData + m_highWaterMark + 1);
+		}
+
+
+		[[nodiscard]] BranchedConstIterator backBranched() const noexcept
+		{
+			BranchedConstIterator toReturn(m_data + m_highWaterMark + 1, m_skipData + m_highWaterMark + 1);
+
+			return m_size ? --toReturn : toReturn;
+		}
+
+
+		[[nodiscard]] BranchedConstIterator cbeginBranched() const noexcept
+		{
+			return begin();
+		}
+
+
+		[[nodiscard]] BranchedConstIterator cendBranched() const noexcept
+		{
+			return end();
+		}
+
+
+		[[nodiscard]] BranchedConstIterator cbackBranched() const noexcept
+		{
+			return back();
+		}
+
 	private: // IMPLEMENTATION
 		void allocate(uint32_t reserveElements)
 		{
 			[[maybe_unused]] static const bool _ = []() noexcept -> bool
 				{
-					OS_PAGE_INFO::getSystemPageData();
+					details::getSystemPageData();
 
 					sm_reservedBytes = (t_VMReserveElements + 1) * sizeof(Node);
-					sm_reservedBytes = align(sm_reservedBytes, OS_PAGE_INFO::pageSize);
+					sm_reservedBytes = align(sm_reservedBytes, details::OS_PAGE_SIZE);
 					sm_skipReservedBytes = (sm_reservedBytes / sizeof(Node) + 1) * sizeof(uint32_t);
-					sm_skipReservedBytes = align(sm_skipReservedBytes, OS_PAGE_INFO::pageSize);
+					sm_skipReservedBytes = align(sm_skipReservedBytes, details::OS_PAGE_SIZE);
 
 					return false;
 				}();
@@ -572,11 +661,11 @@ namespace gbr
 			const size_t elementsToReserve = std::clamp(static_cast<size_t>(reserveElements), 1ULL, t_VMReserveElements + 1);
 
 			size_t reserveSize = (elementsToReserve + 1) * sizeof(Node);
-			reserveSize = align(reserveSize, OS_PAGE_INFO::pageSize);
+			reserveSize = align(reserveSize, details::OS_PAGE_SIZE);
 			size_t skipReserveSize = (reserveSize / sizeof(Node) + 1) * sizeof(uint32_t);
-			skipReserveSize = align(skipReserveSize, OS_PAGE_INFO::pageSize);
+			skipReserveSize = align(skipReserveSize, details::OS_PAGE_SIZE);
 
-			m_pageCount = reserveSize / OS_PAGE_INFO::pageSize;
+			m_pageCount = reserveSize / details::OS_PAGE_SIZE;
 
 			m_data = static_cast<Node*>(VirtualAlloc(NULL, sm_reservedBytes, MEM_RESERVE, PAGE_READWRITE));
 			m_skipData = static_cast<uint32_t*>(VirtualAlloc(NULL, sm_skipReservedBytes, MEM_RESERVE, PAGE_READWRITE));
@@ -630,7 +719,7 @@ namespace gbr
 
 			memcpy(m_skipData, other.m_skipData, (m_highWaterMark + 1) * sizeof(uint32_t));
 
-			if constexpr (std::is_trivially_copy_constructible_v<T>)
+			if constexpr (std::is_trivially_copyable_v<T>)
 			{
 				memcpy(m_data, other.m_data, (m_highWaterMark + 1) * sizeof(Node));
 			}
@@ -678,7 +767,7 @@ namespace gbr
 
 					if constexpr (t_enableLastIndex)
 					{
-						if (reinterpret_cast<Node*>(reinterpret_cast<char*>(element) - offsetof(Node, value)) - m_data >= lastIndex)
+						if (reinterpret_cast<Node*>(reinterpret_cast<char*>(&element) - offsetof(Node, value)) - m_data >= lastIndex)
 						{
 							break;
 						}
@@ -697,18 +786,18 @@ namespace gbr
 
 		[[nodiscard]] size_t getSkipArrayBytes() const noexcept
 		{
-			const size_t skipArrayBytes = (m_pageCount * OS_PAGE_INFO::pageSize / sizeof(Node) + 1) * sizeof(uint32_t);
+			const size_t skipArrayBytes = (m_pageCount * details::OS_PAGE_SIZE / sizeof(Node) + 1) * sizeof(uint32_t);
 
-			return align(skipArrayBytes, OS_PAGE_INFO::pageSize);
+			return align(skipArrayBytes, details::OS_PAGE_SIZE);
 		}
 
 
 		void decommitPages(uint32_t index) noexcept
 		{
 			size_t bytesUsed = (index + 1) * sizeof(Node);
-			bytesUsed = align(bytesUsed, OS_PAGE_INFO::pageSize);
-			const uint32_t pagesUsed = bytesUsed / OS_PAGE_INFO::pageSize;
-			const size_t bytesToDecommit = (m_pageCount - pagesUsed) * OS_PAGE_INFO::pageSize;
+			bytesUsed = align(bytesUsed, details::OS_PAGE_SIZE);
+			const uint32_t pagesUsed = bytesUsed / details::OS_PAGE_SIZE;
+			const size_t bytesToDecommit = (m_pageCount - pagesUsed) * details::OS_PAGE_SIZE;
 
 			const size_t prevSkipArrayBytes = getSkipArrayBytes();
 
@@ -719,8 +808,6 @@ namespace gbr
 
 			if (bytesToDecommit)
 			{
-				sm_isFull = false;
-
 				if (!VirtualFree(reinterpret_cast<char*>(m_data) + bytesUsed, bytesToDecommit, MEM_DECOMMIT))
 				{
 					goto FAIL;
@@ -789,25 +876,17 @@ namespace gbr
 
 		void grow(uint32_t newPageCount)
 		{
-			if (!sm_isFull)
+			const uint32_t maxPageCount = static_cast<uint32_t>(sm_reservedBytes / details::OS_PAGE_SIZE);
+
+			m_pageCount = std::min(newPageCount, maxPageCount);
+			m_endData = m_data + m_pageCount * details::OS_PAGE_SIZE / sizeof(Node);
+
+			const bool dataCode = VirtualAlloc(m_data, (m_pageCount * details::OS_PAGE_SIZE), MEM_COMMIT, PAGE_READWRITE);
+			const bool skipDataCode = VirtualAlloc(m_skipData, getSkipArrayBytes(), MEM_COMMIT, PAGE_READWRITE);
+
+			if (!dataCode || !skipDataCode)
 			{
-				const uint32_t maxPageCount = static_cast<uint32_t>(sm_reservedBytes / OS_PAGE_INFO::pageSize);
-
-				if (newPageCount >= maxPageCount)
-				{
-					sm_isFull = true;
-				}
-
-				m_pageCount = std::min(newPageCount, maxPageCount);
-				m_endData = m_data + m_pageCount * OS_PAGE_INFO::pageSize / sizeof(Node);
-
-				const bool dataCode = VirtualAlloc(m_data, (m_pageCount * OS_PAGE_INFO::pageSize), MEM_COMMIT, PAGE_READWRITE);
-				const bool skipDataCode = VirtualAlloc(m_skipData, getSkipArrayBytes(), MEM_COMMIT, PAGE_READWRITE);
-
-				if (!dataCode || !skipDataCode)
-				{
-					goto FAIL;
-				}
+				goto FAIL;
 			}
 
 			return;
@@ -890,7 +969,6 @@ namespace gbr
 		}
 
 	private: // MEMBERS
-		inline static bool sm_isFull = false;
 		inline static size_t sm_reservedBytes;
 		inline static size_t sm_skipReservedBytes;
 
@@ -905,39 +983,78 @@ namespace gbr
 
 
 	// ITERATOR
-	template<class T, size_t elements, UseGenerationsConcept UseGenerations, ConstIteratorConcept IsConst>
-	class stableVectorIterator
+	namespace details
+	{
+		template<class T, size_t t_elements, UseGenerationsConcept t_useGenerations, ConstIteratorConcept t_isConst, IteratorBranchConcept>
+		class stableVectorIteratorBase
+		{
+		protected:
+			template<class, size_t t_VMReserveElements, UseGenerationsConcept>
+				requires (t_VMReserveElements <= UINT32_MAX)
+			friend class stableVector;
+
+		public:
+			using value_type = T;
+			using difference_type = std::ptrdiff_t;
+			using iterator_category = std::bidirectional_iterator_tag;
+
+		protected:
+			constexpr static bool Constant = std::same_as<t_isConst, is_const>;
+
+			using ValueType = std::conditional_t<Constant, const T, T>;
+			using DataValueType = std::conditional_t<Constant, typename const stableVector<T, t_elements, t_useGenerations>::Node*, typename stableVector<T, t_elements, t_useGenerations>::Node*>;
+			using SkipValueType = std::conditional_t<Constant, const uint32_t*, uint32_t*>;
+
+		public:
+			stableVectorIteratorBase() noexcept = default;
+
+
+			stableVectorIteratorBase(DataValueType data, SkipValueType skipPtr) noexcept : m_data(data), m_skipPtr(skipPtr) {}
+
+		public:
+			[[nodiscard]] ValueType& operator*() const noexcept
+			{
+				return m_data->value;
+			}
+
+
+			[[nodiscard]] ValueType* operator->() const noexcept
+			{
+				return reinterpret_cast<ValueType*>(&m_data->value);
+			}
+
+
+			bool operator==(const stableVectorIteratorBase& other) const noexcept { return m_data == other.m_data; }
+			bool operator!=(const stableVectorIteratorBase& other) const noexcept { return m_data != other.m_data; }
+			bool operator>(const stableVectorIteratorBase& other) const noexcept { return m_data > other.m_data; }
+			bool operator<(const stableVectorIteratorBase& other) const noexcept { return m_data < other.m_data; }
+			bool operator>=(const stableVectorIteratorBase& other) const noexcept { return m_data >= other.m_data; }
+			bool operator<=(const stableVectorIteratorBase& other) const noexcept { return m_data <= other.m_data; }
+
+		protected:
+			DataValueType m_data;
+			SkipValueType m_skipPtr;
+		};
+	}
+
+
+	template<class T, size_t t_elements, UseGenerationsConcept t_useGenerations, ConstIteratorConcept t_isConst>
+	class stableVectorIterator<T, t_elements, t_useGenerations, t_isConst, branchless> : public details::stableVectorIteratorBase<T, t_elements, t_useGenerations, t_isConst, branchless>
 	{
 	private:
-		template<class, size_t t_VMReserveElements, UseGenerationsConcept>
-			requires (t_VMReserveElements <= UINT32_MAX)
-		friend class stableVector;
+		using Base = details::stableVectorIteratorBase<T, t_elements, t_useGenerations, t_isConst, branchless>;
 
 	public:
-		using value_type = T;
-		using difference_type = std::ptrdiff_t;
-		using iterator_category = std::bidirectional_iterator_tag;
-
-	private:
-		constexpr static bool Constant = std::same_as<IsConst, is_const>;
-
-		using ValueType = std::conditional_t<Constant, const T, T>;
-		using DataValueType = std::conditional_t<Constant, typename const stableVector<T, elements, UseGenerations>::Node*, typename stableVector<T, elements, UseGenerations>::Node*>;
-		using SkipValueType = std::conditional_t<Constant, const uint32_t*, uint32_t*>;
-
-	public:
-		stableVectorIterator() noexcept = default;
-
-
-		stableVectorIterator(DataValueType data, SkipValueType skipPtr) noexcept : data(data), skipPtr(skipPtr) {}
+		using Base::Base;
 
 	public:
 		stableVectorIterator& operator++() noexcept
 		{
-			++skipPtr;
-			++data;
-			data += *skipPtr;
-			skipPtr += *skipPtr;
+			++this->m_skipPtr;
+			++this->m_data;
+			this->m_data += *this->m_skipPtr;
+			this->m_skipPtr += *this->m_skipPtr;
+
 			return *this;
 		}
 
@@ -946,16 +1063,18 @@ namespace gbr
 		{
 			const stableVectorIterator other{ *this };
 			++*this;
+
 			return other;
 		}
 
 
 		stableVectorIterator& operator--() noexcept
 		{
-			--skipPtr;
-			--data;
-			data -= *skipPtr;
-			skipPtr -= *skipPtr;
+			--this->m_skipPtr;
+			--this->m_data;
+			this->m_data -= *this->m_skipPtr;
+			this->m_skipPtr -= *this->m_skipPtr;
+
 			return *this;
 		}
 
@@ -964,32 +1083,63 @@ namespace gbr
 		{
 			const stableVectorIterator other{ *this };
 			--*this;
+
+			return other;
+		}
+	};
+
+
+
+	template<class T, size_t t_elements, UseGenerationsConcept t_useGenerations, ConstIteratorConcept t_isConst>
+	class stableVectorIterator<T, t_elements, t_useGenerations, t_isConst, branched> : public details::stableVectorIteratorBase<T, t_elements, t_useGenerations, t_isConst, branched>
+	{
+	private:
+		using Base = details::stableVectorIteratorBase<T, t_elements, t_useGenerations, t_isConst, branched>;
+
+	public:
+		using Base::Base;
+
+	public:
+		stableVectorIterator& operator++() noexcept
+		{
+			do
+			{
+				++this->m_skipPtr;
+				++this->m_data;
+			} while (*this->m_skipPtr);
+
+			return *this;
+		}
+
+
+		stableVectorIterator operator++(int) noexcept
+		{
+			const stableVectorIterator other{ *this };
+			++*this;
+
 			return other;
 		}
 
 
-		[[nodiscard]] ValueType& operator*() const noexcept
+		stableVectorIterator& operator--() noexcept
 		{
-			return data->value;
+			do
+			{
+				--this->m_skipPtr;
+				--this->m_data;
+			} while (*this->m_skipPtr);
+
+			return *this;
 		}
 
 
-		[[nodiscard]] ValueType* operator->() const noexcept
+		stableVectorIterator operator--(int) noexcept
 		{
-			return reinterpret_cast<ValueType*>(&data->value);
+			const stableVectorIterator other{ *this };
+			--*this;
+
+			return other;
 		}
-
-
-		bool operator==(const stableVectorIterator& other) const noexcept { return data == other.data; }
-		bool operator!=(const stableVectorIterator& other) const noexcept { return data != other.data; }
-		bool operator>(const stableVectorIterator& other) const noexcept { return data > other.data; }
-		bool operator<(const stableVectorIterator& other) const noexcept { return data < other.data; }
-		bool operator>=(const stableVectorIterator& other) const noexcept { return data >= other.data; }
-		bool operator<=(const stableVectorIterator& other) const noexcept { return data <= other.data; }
-
-	private:
-		DataValueType data;
-		SkipValueType skipPtr;
 	};
 
 
@@ -1164,30 +1314,5 @@ namespace gbr
 		};
 
 		CompressedState m_state;
-	};
-
-
-	// OS PAGE INFO
-	class OS_PAGE_INFO
-	{
-		template<class, size_t t_VMReserveElements, UseGenerationsConcept>
-			requires (t_VMReserveElements <= UINT32_MAX)
-		friend class stableVector;
-
-
-		inline static size_t pageSize;
-
-
-		static void getSystemPageData()
-		{
-			[[maybe_unused]] static const bool _ = []() noexcept -> bool
-				{
-					SYSTEM_INFO systemInfo;
-					GetSystemInfo(&systemInfo);
-					pageSize = static_cast<size_t>(systemInfo.dwPageSize);
-
-					return false;
-				}();
-		}
 	};
 }
