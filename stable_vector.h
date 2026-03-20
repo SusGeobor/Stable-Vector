@@ -19,39 +19,42 @@ namespace gbr
 	struct not_const {};
 	struct use_generations {};
 	struct no_generations {};
+	struct return_map {};
+	struct no_map {};
 
 
 	template<class T>
-	concept Const_Iterator_Concept = std::same_as<T, is_const> || std::same_as<T, not_const>;
+	concept ConstIteratorConcept = std::same_as<T, is_const> || std::same_as<T, not_const>;
 
 	template<class T>
-	concept Use_Generations_Concept = std::same_as<T, use_generations> || std::same_as<T, no_generations>;
+	concept UseGenerationsConcept = std::same_as<T, use_generations> || std::same_as<T, no_generations>;
 
+	template<class T>
+	concept ReturnRemapMapConcept = std::same_as<T, return_map> || std::same_as<T, no_map>;
+
+	template<class, size_t, UseGenerationsConcept, ConstIteratorConcept>
+	class stableVectorIterator;
+
+	template<class>
+	class RemapMap;
 
 	class OS_PAGE_INFO;
 
-	template<class, size_t, Use_Generations_Concept, Const_Iterator_Concept>
-	class stableVectorIterator;
 
-	template<class KeyValue>
-	class RemapMap;
 
 	// STABLE VECTOR
-	template<class T, size_t elements, Use_Generations_Concept UseGenerations = no_generations>
+	template<class T, size_t t_VMReserveElements, UseGenerationsConcept t_useGenerations = no_generations>
+		requires (t_VMReserveElements <= UINT32_MAX)
 	class stableVector
 	{
+	private:
+		static_assert(std::is_nothrow_destructible_v<T>, "gbr::stableVector requires T to be nothrow destructible");
+
 	private: // TYPES
-		struct FreeStackIndex
+		struct FreeListIndices
 		{
-			uint32_t left;
-			uint32_t right;
-		};
-
-
-		struct FreeListNode
-		{
-			FreeListNode* previous;
-			FreeStackIndex indices;
+			uint32_t next;
+			uint32_t previous;
 		};
 
 
@@ -60,43 +63,49 @@ namespace gbr
 			union
 			{
 				T value;
-				FreeListNode freeListNode;
+				FreeListIndices indices;
 			};
 		};
 
 
 		struct GenerationalNode
 		{
+			uint32_t generation;
+
 			union
 			{
 				T value;
-				FreeListNode freeListNode;
+				FreeListIndices indices;
 			};
-
-			size_t generation;
 		};
 
 	public:
+		struct IndividualisticHandle
+		{
+			uint32_t index;
+		};
+
+
 		struct GenerationalHandle
 		{
-			T* ptr;
-			size_t generation;
+			uint32_t index;
+			uint32_t generation;
 		};
 
 	private: // MEMBER ALIASES
-		template<class, size_t, Use_Generations_Concept, Const_Iterator_Concept>
+		template<class, size_t, UseGenerationsConcept, ConstIteratorConcept>
 		friend class stableVectorIterator;
 
 
-		constexpr static bool Generational = std::same_as<UseGenerations, use_generations>;
+		constexpr static bool c_generational = std::same_as<t_useGenerations, use_generations>;
 
 
-		using Node = std::conditional_t<Generational, GenerationalNode, IndividualisticNode>;
+		using Node = std::conditional_t<c_generational, GenerationalNode, IndividualisticNode>;
 
 	public:
-		using ReturnHandle = std::conditional_t<Generational, GenerationalHandle, T*>;
-		using Iterator = stableVectorIterator<T, elements, UseGenerations, not_const>;
-		using ConstIterator = stableVectorIterator<T, elements, UseGenerations, is_const>;
+		using Handle = std::conditional_t<c_generational, GenerationalHandle, IndividualisticHandle>;
+		using Iterator = stableVectorIterator<T, t_VMReserveElements, t_useGenerations, not_const>;
+		using ConstIterator = stableVectorIterator<T, t_VMReserveElements, t_useGenerations, is_const>;
 
 	public: // CONSTRUCTORS
 		stableVector()
@@ -122,8 +131,8 @@ namespace gbr
 			if (this != &other)
 			{
 				deallocate();
-				highWaterMark = 0;
-				freeList = nullptr;
+
+				m_highWaterMark = 0;
 
 				copyStableVector(other);
 			}
@@ -134,218 +143,303 @@ namespace gbr
 
 		stableVector(stableVector&& other) noexcept
 		{
-			pageCount = other.pageCount;
-			highWaterMark = other.highWaterMark;
-			elementCount = other.elementCount;
-			data = other.data;
-			endData = other.endData;
-			skipArray = other.skipArray;
-			freeList = other.freeList;
+			m_data = other.m_data;
+			m_endData = other.m_endData;
+			m_skipData = other.m_skipData;
+			m_pageCount = other.m_pageCount;
+			m_highWaterMark = other.m_highWaterMark;
+			m_size = other.m_size;
 
-			other.elementCount = 0;
-			other.data = nullptr;
-			other.skipArray = nullptr;
+			other.m_data = nullptr;
+			other.m_endData = nullptr;
+			other.m_skipData = nullptr;
+			other.m_pageCount = 0;
+			other.m_highWaterMark = 0;
+			other.m_size = 0;
 		}
 
 
-		stableVector& operator=(stableVector&& other) noexcept(std::is_nothrow_destructible_v<T>)
+		stableVector& operator=(stableVector&& other) noexcept
 		{
 			if (this != &other)
 			{
 				deallocate();
 
-				pageCount = other.pageCount;
-				highWaterMark = other.highWaterMark;
-				elementCount = other.elementCount;
-				data = other.data;
-				endData = other.endData;
-				skipArray = other.skipArray;
-				freeList = other.freeList;
+				m_data = other.m_data;
+				m_endData = other.m_endData;
+				m_skipData = other.m_skipData;
+				m_pageCount = other.m_pageCount;
+				m_highWaterMark = other.m_highWaterMark;
+				m_size = other.m_size;
 
-				other.elementCount = 0;
-				other.data = nullptr;
-				other.skipArray = nullptr;
+				other.m_data = nullptr;
+				other.m_endData = nullptr;
+				other.m_skipData = nullptr;
+				other.m_pageCount = 0;
+				other.m_highWaterMark = 0;
+				other.m_size = 0;
 			}
 
 			return *this;
 		}
 
 
-		~stableVector() noexcept(std::is_nothrow_destructible_v<T>)
+		~stableVector() noexcept
 		{
 			deallocate();
 		}
 
-	public: // MEMBER FUNCTIONS, INSERT
-		ReturnHandle insert(const T& value)
+	public: // MEMBER FUNCTIONS
+		Handle insert(const T& value)
 		{
 			return emplace(value);
 		}
 
 
-		ReturnHandle insert(T&& value)
+		Handle insert(T&& value)
 		{
 			return emplace(std::move(value));
 		}
 
 
 		template<class... Args>
-		ReturnHandle emplace(Args&&... args)
+		Handle emplace(Args&&... args)
 		{
 			Node* const slot = getAllocationSlot();
 
-			::new(slot) T(std::forward<Args>(args)...);
+			::new(&slot->value) T(std::forward<Args>(args)...);
 
-			++elementCount;
+			++m_size;
 
-			if constexpr (Generational)
+			if constexpr (c_generational)
 			{
 				++(slot->generation);
 
-				return { reinterpret_cast<T*>(slot), slot->generation };
+				return { static_cast<uint32_t>(slot - m_data - 1), slot->generation };
 			}
 			else
 			{
-				return reinterpret_cast<ReturnHandle>(slot);
+				return { static_cast<uint32_t>(slot - m_data - 1) };
 			}
 		}
 
-		// ERASE
-		void erase(T* value) noexcept(std::is_nothrow_destructible_v<T>)
+
+		void erase(uint32_t index) noexcept
 		{
-			const size_t index = reinterpret_cast<Node*>(value) - data;
+			m_data[index + 1].value.~T();
 
-			data[index].value.~T();
-			::new(data + index) FreeListNode{ freeList, { skipArray[index], skipArray[index + 2] } };
-			freeList = reinterpret_cast<FreeListNode*>(data + index);
+			updateSkipArray(index + 1);
 
-			if constexpr (Generational)
+			if constexpr (c_generational)
 			{
-				++(reinterpret_cast<Node*>(value)->generation);
+				++m_data[index + 1].generation;
 			}
 
-			updateSkipArray(skipArray + index + 1);
-
-			--elementCount;
+			--m_size;
 		}
 
 
-		Iterator erase(const Iterator& iterator) noexcept(std::is_nothrow_destructible_v<T>)
+		void erase(Handle handle) noexcept
+		{
+			erase(handle.index);
+		}
+
+
+		Iterator erase(const Iterator& iterator) noexcept
 		{
 			Iterator nextElement = iterator;
 			++nextElement;
 
 			iterator.data->value.~T();
-			::new(iterator.data) FreeListNode{ freeList, { iterator.skipPtr[-1], iterator.skipPtr[1] } };
-			freeList = reinterpret_cast<FreeListNode*>(iterator.data);
 
-			if constexpr (Generational)
+			updateSkipArray(iterator.skipPtr - m_skipData);
+
+			if constexpr (c_generational)
 			{
 				++(iterator.data->generation);
 			}
 
-			updateSkipArray(iterator.skipPtr);
-
-			--elementCount;
+			--m_size;
 
 			return nextElement;
 		}
 
 		// HELPERS
+		[[nodiscard]] T& at(uint32_t index) noexcept
+		{
+			return m_data[index + 1].value;
+		}
+
+
+		[[nodiscard]] const T& at(const uint32_t index) const noexcept
+		{
+			return m_data[index + 1].value;
+		}
+
+
+		[[nodiscard]] T& at(Handle handle) noexcept
+		{
+			return at(handle.index);
+		}
+
+
+		[[nodiscard]] const T& at(const Handle handle) const noexcept
+		{
+			return at(handle.index);
+		}
+
+
 		[[nodiscard]] size_t size() const noexcept
 		{
-			return elementCount;
+			return m_size;
 		}
 
 
-		[[nodiscard]] bool isAlive(T* value) const noexcept
+		[[nodiscard]] bool isAlive(uint32_t index) const noexcept
 		{
-			const size_t index = reinterpret_cast<Node*>(value) - data;
-
-			return !skipArray[index + 1];
+			return !m_skipData[index + 1];
 		}
 
 
-		[[nodiscard]] static bool isValid(T* value, size_t generation) noexcept
-			requires Generational
+		[[nodiscard]] bool isAlive(Handle handle) const noexcept
 		{
-			return reinterpret_cast<Node*>(value)->generation == generation;
+			return isAlive(handle.index);
 		}
 
 
-		[[nodiscard]] static size_t& getGeneration(T* value) noexcept
-			requires Generational
+		[[nodiscard]] bool isValid(Handle handle) const noexcept
+			requires c_generational
 		{
-			return reinterpret_cast<Node*>(value)->generation;
+			return m_data[handle.index + 1].generation == handle.generation;
 		}
 
 
-		[[nodiscard]] static const size_t& getGeneration(const T* value) noexcept
-			requires Generational
+		[[nodiscard]] uint32_t& getGeneration(uint32_t index) noexcept
+			requires c_generational
 		{
-			return reinterpret_cast<const Node*>(value)->generation;
+			return m_data[index + 1].generation;
 		}
 
 
-		void reserve(size_t reserveElements)
+		[[nodiscard]] const uint32_t& getGeneration(const uint32_t index) const noexcept
+			requires c_generational
 		{
-			if (const size_t newPageCount = align(reserveElements * sizeof(Node), OS_PAGE_INFO::pageSize) / OS_PAGE_INFO::pageSize; newPageCount > pageCount)
+			return m_data[index + 1].generation;
+		}
+
+
+		[[nodiscard]] uint32_t& getGeneration(Handle handle) noexcept
+			requires c_generational
+		{
+			return getGeneration(handle.index);
+		}
+
+
+		[[nodiscard]] const uint32_t& getGeneration(const Handle handle) const noexcept
+			requires c_generational
+		{
+			return getGeneration(handle.index);
+		}
+
+
+		void reserve(uint32_t reserveElements)
+		{
+			if (const uint32_t newPageCount = align(reserveElements * sizeof(Node), OS_PAGE_INFO::pageSize) / OS_PAGE_INFO::pageSize; newPageCount > m_pageCount)
 			{
 				grow(newPageCount);
 			}
 		}
 
-
-		[[nodiscard]] RemapMap<T*> compress() // Intended to break pointer stability
+		// Intended to break pointer stability
+		template<ReturnRemapMapConcept t_returnMap = return_map, class Allocator = std::allocator<uint32_t>>
+		std::conditional_t<std::same_as<t_returnMap, return_map>, RemapMap<Allocator>, no_map> compress()
+			requires std::is_nothrow_move_constructible_v<T>
 		{
-			RemapMap<T*> remapMap;
+			static constexpr bool c_returnMap = std::same_as<t_returnMap, return_map>;
+			std::conditional_t<c_returnMap, RemapMap<Allocator>, no_map> remapMap;
 
-			size_t lastIndex = 0;
+			uint32_t lastIndex = 0;
 
-			if (elementCount)
+			if (m_size)
 			{
-				lastIndex = cback().data - data;
+				lastIndex = cback().data - m_data;
+				size_t elementsToMove = 0;
 
-				remapMap.allocate(std::bit_ceil((lastIndex + 1) - elementCount) * 2);
-
-				for (size_t currentIndex = 0; currentIndex < lastIndex; ++currentIndex)
+				if constexpr (c_returnMap)
 				{
-					if (skipArray[currentIndex + 1])
-					{
-						::new(data + currentIndex) T(std::move(*reinterpret_cast<T*>(data + lastIndex)));
+					size_t skipSlots = 0;
+					size_t countedElements = 0;
 
-						if constexpr (Generational)
+					for (const uint32_t* currentIndex = m_skipData; skipSlots < m_size - countedElements;)
+					{
+						++currentIndex;
+						++countedElements;
+						skipSlots += *currentIndex;
+						currentIndex += *currentIndex;
+					}
+
+					elementsToMove = m_size - countedElements;
+				}
+				else
+				{
+					elementsToMove = lastIndex - m_size;
+				}
+
+				if (elementsToMove)
+				{
+					if constexpr (c_returnMap)
+					{
+						size_t pow2ElementsToMove = std::bit_ceil(elementsToMove);
+
+						if (static_cast<float>(elementsToMove) / static_cast<float>(pow2ElementsToMove) > 0.6f)
 						{
-							data[currentIndex].generation = data[lastIndex].generation;
+							pow2ElementsToMove *= 2;
 						}
 
-						reinterpret_cast<T*>(data + lastIndex)->~T();
+						remapMap.allocate(pow2ElementsToMove);
+					}
 
-						remapMap.insert(reinterpret_cast<T*>(data + lastIndex), reinterpret_cast<T*>(data + currentIndex));
+					for (uint32_t currentIndex = 1; currentIndex < lastIndex; ++currentIndex)
+					{
+						if (m_skipData[currentIndex])
+						{
+							::new(&m_data[currentIndex].value) T(std::move(m_data[lastIndex].value));
+							m_data[lastIndex].value.~T();
 
-						while (skipArray[--lastIndex + 1] && lastIndex > currentIndex) {}
+							if constexpr (c_generational)
+							{
+								m_data[currentIndex].generation = m_data[lastIndex].generation;
+							}
+
+							if constexpr (c_returnMap)
+							{
+								remapMap.insert(lastIndex - 1, currentIndex - 1);
+							}
+
+							while (m_skipData[--lastIndex] && lastIndex > currentIndex) {}
+						}
 					}
 				}
 
-				decommitPages(elementCount - 1);
+				decommitPages(m_size);
 			}
 			else
 			{
 				decommitPages(lastIndex);
 			}
 
-			highWaterMark = elementCount;
-			freeList = nullptr;
+			m_highWaterMark = m_size;
+			m_data[0].indices = FreeListIndices{};
 
-			if constexpr (Generational)
+			if constexpr (c_generational)
 			{
-				for (size_t currentIndex = highWaterMark; data + currentIndex != endData; ++currentIndex)
+				for (uint32_t currentIndex = m_highWaterMark + 1; m_data + currentIndex != m_endData; ++currentIndex)
 				{
-					::new(data + currentIndex) Node{};
+					::new(m_data + currentIndex) Node{};
 				}
 			}
 
-			memset(skipArray, 0, getSkipArrayBytes());
+			memset(m_skipData, 0, getSkipArrayBytes());
 
 			return remapMap;
 		}
@@ -353,81 +447,93 @@ namespace gbr
 
 		void shrinkToFit() noexcept
 		{
-			size_t index = 0;
+			uint32_t index = 0;
 
-			if (elementCount)
+			m_data[0].indices = FreeListIndices{};
+
+			if (m_size)
 			{
-				index = cback().data - data;
+				index = cback().data - m_data;
 
 				decommitPages(index);
 
-				FreeListNode* toPointTo = nullptr;
-				for (size_t currentIndex = (endData - data) - 1; currentIndex != index; --currentIndex)
+				if constexpr (c_generational)
 				{
-					if constexpr (Generational)
-					{
-						::new(data + currentIndex) Node{};
-					}
-
-					skipArray[currentIndex + 1] = 0;
-				}
-				for (size_t currentIndex = index; currentIndex != std::numeric_limits<size_t>::max(); --currentIndex)
-				{
-					if (skipArray[currentIndex + 1])
-					{
-						data[currentIndex].freeListNode.previous = toPointTo;
-						toPointTo = reinterpret_cast<FreeListNode*>(data + currentIndex);
-					}
+					memset(m_data + index + 1, 0, (m_endData - m_data - index - 1) * sizeof(Node));
 				}
 
-				highWaterMark = index + 1;
-				freeList = toPointTo;
+				memset(m_skipData + index + 1, 0, getSkipArrayBytes() - (index + 1) * sizeof(uint32_t));
+
+				uint32_t newFreeListIndex = 0;
+				for (const uint32_t* currentIndex = m_skipData + index; currentIndex != m_skipData;)
+				{
+					--currentIndex;
+					currentIndex -= *currentIndex;
+
+					const uint32_t freeListIndex = currentIndex - m_skipData;
+
+					if (m_skipData[freeListIndex + 1])
+					{
+						m_data[freeListIndex + 1].indices.next = newFreeListIndex;
+						m_data[newFreeListIndex].indices.previous = freeListIndex + 1;
+						newFreeListIndex = freeListIndex + 1;
+					}
+				}
+
+				m_data[newFreeListIndex].indices.previous = 0;
+				m_data[0].indices.next = newFreeListIndex;
+
+				m_highWaterMark = index;
 
 				return;
 			}
 
 			decommitPages(index);
 
-			highWaterMark = 0;
-			freeList = nullptr;
+			m_highWaterMark = 0;
+			m_data[0].indices = FreeListIndices{};
 
-			memset(skipArray, 0, getSkipArrayBytes());
+			memset(m_skipData, 0, getSkipArrayBytes());
 		}
 
 		// ITERATORS
 		[[nodiscard]] Iterator begin() noexcept
 		{
-			return Iterator(data + skipArray[1], skipArray + skipArray[1] + 1);
+			return Iterator(m_data + m_skipData[1] + 1, m_skipData + m_skipData[1] + 1);
 		}
 
 
 		[[nodiscard]] Iterator end() noexcept
 		{
-			return Iterator(data + highWaterMark, skipArray + highWaterMark + 1);
+			return Iterator(m_data + m_highWaterMark + 1, m_skipData + m_highWaterMark + 1);
 		}
 
 
 		[[nodiscard]] Iterator back() noexcept
 		{
-			return --Iterator(data + highWaterMark, skipArray + highWaterMark + 1);
+			Iterator toReturn(m_data + m_highWaterMark + 1, m_skipData + m_highWaterMark + 1);
+
+			return m_size ? --toReturn : toReturn;
 		}
 
 
 		[[nodiscard]] ConstIterator begin() const noexcept
 		{
-			return ConstIterator(data + skipArray[1], skipArray + skipArray[1] + 1);
+			return ConstIterator(m_data + m_skipData[1] + 1, m_skipData + m_skipData[1] + 1);
 		}
 
 
 		[[nodiscard]] ConstIterator end() const noexcept
 		{
-			return ConstIterator(data + highWaterMark, skipArray + highWaterMark + 1);
+			return ConstIterator(m_data + m_highWaterMark + 1, m_skipData + m_highWaterMark + 1);
 		}
 
 
 		[[nodiscard]] ConstIterator back() const noexcept
 		{
-			return --ConstIterator(data + highWaterMark, skipArray + highWaterMark + 1);
+			ConstIterator toReturn(m_data + m_highWaterMark + 1, m_skipData + m_highWaterMark + 1);
+
+			return m_size ? --toReturn : toReturn;
 		}
 
 
@@ -449,82 +555,138 @@ namespace gbr
 		}
 
 	private: // IMPLEMENTATION
-		void allocate(size_t reserveElements)
+		void allocate(uint32_t reserveElements)
 		{
 			[[maybe_unused]] static const bool _ = []() noexcept -> bool
 				{
 					OS_PAGE_INFO::getSystemPageData();
 
-					reservedBytes = elements * sizeof(Node);
-					skipReservedBytes = (elements + 2) * sizeof(uint32_t);
-					reservedBytes = align(reservedBytes, OS_PAGE_INFO::pageSize);
-					skipReservedBytes = align(skipReservedBytes, OS_PAGE_INFO::pageSize);
+					sm_reservedBytes = (t_VMReserveElements + 1) * sizeof(Node);
+					sm_reservedBytes = align(sm_reservedBytes, OS_PAGE_INFO::pageSize);
+					sm_skipReservedBytes = (sm_reservedBytes / sizeof(Node) + 1) * sizeof(uint32_t);
+					sm_skipReservedBytes = align(sm_skipReservedBytes, OS_PAGE_INFO::pageSize);
 
 					return false;
 				}();
 
-			reserveElements = std::clamp(reserveElements, 1ULL, elements);
+			const size_t elementsToReserve = std::clamp(static_cast<size_t>(reserveElements), 1ULL, t_VMReserveElements + 1);
 
-			size_t reserveSize = reserveElements * sizeof(Node);
-			size_t skipReserveSize = (reserveElements + 2) * sizeof(uint32_t);
+			size_t reserveSize = (elementsToReserve + 1) * sizeof(Node);
 			reserveSize = align(reserveSize, OS_PAGE_INFO::pageSize);
+			size_t skipReserveSize = (reserveSize / sizeof(Node) + 1) * sizeof(uint32_t);
 			skipReserveSize = align(skipReserveSize, OS_PAGE_INFO::pageSize);
 
-			pageCount = reserveSize / OS_PAGE_INFO::pageSize;
+			m_pageCount = reserveSize / OS_PAGE_INFO::pageSize;
 
-			data = static_cast<Node*>(VirtualAlloc(NULL, reservedBytes, MEM_RESERVE, PAGE_READWRITE));
-			skipArray = static_cast<uint32_t*>(VirtualAlloc(NULL, skipReservedBytes, MEM_RESERVE, PAGE_READWRITE));
+			m_data = static_cast<Node*>(VirtualAlloc(NULL, sm_reservedBytes, MEM_RESERVE, PAGE_READWRITE));
+			m_skipData = static_cast<uint32_t*>(VirtualAlloc(NULL, sm_skipReservedBytes, MEM_RESERVE, PAGE_READWRITE));
 
-			if (!data || !skipArray)
+			if (!m_data || !m_skipData)
 			{
 				goto FAIL;
 			}
-			if (!VirtualAlloc(data, reserveSize, MEM_COMMIT, PAGE_READWRITE) ||
-				!VirtualAlloc(skipArray, skipReserveSize, MEM_COMMIT, PAGE_READWRITE))
+			if (!VirtualAlloc(m_data, reserveSize, MEM_COMMIT, PAGE_READWRITE) ||
+				!VirtualAlloc(m_skipData, skipReserveSize, MEM_COMMIT, PAGE_READWRITE))
 			{
 				goto FAIL;
 			}
 
-			endData = data + (reserveSize / sizeof(Node));
+			m_endData = m_data + reserveSize / sizeof(Node);
+
+			::new(&m_data[0].indices) FreeListIndices{};
 
 			return;
 
 		FAIL:
+			if (m_data)
+			{
+				if (!VirtualFree(m_data, 0, MEM_RELEASE))
+				{
+					goto FAIL1;
+				}
+			}
+			if (m_skipData)
+			{
+				if (!VirtualFree(m_skipData, 0, MEM_RELEASE))
+				{
+					goto FAIL1;
+				}
+			}
+
 			throw std::bad_alloc();
+
+		FAIL1:
+			std::cerr << "VirtualFree failed\n";
+			std::terminate();
 		}
 
 
 		void copyStableVector(const stableVector& other)
 		{
-			elementCount = other.elementCount;
+			m_size = other.m_size;
+			m_highWaterMark = other.m_highWaterMark;
 
-			allocate(other.elementCount);
+			allocate(m_highWaterMark);
 
-			for (const T& element : other)
+			memcpy(m_skipData, other.m_skipData, (m_highWaterMark + 1) * sizeof(uint32_t));
+
+			if constexpr (std::is_trivially_copy_constructible_v<T>)
 			{
-				::new(data + highWaterMark) T(element);
+				memcpy(m_data, other.m_data, (m_highWaterMark + 1) * sizeof(Node));
+			}
+			else
+			{
+				size_t currentIndex = 0;
 
-				if constexpr (Generational)
+				try
 				{
-					++((data + highWaterMark)->generation);
-				}
+					for (; currentIndex != m_highWaterMark + 1; ++currentIndex)
+					{
+						if (m_skipData[currentIndex])
+						{
+							::new(&m_data[currentIndex].indices) FreeListIndices(other.m_data[currentIndex].indices);
+						}
+						else
+						{
+							::new(&m_data[currentIndex].value) T(other.m_data[currentIndex].value);
+						}
 
-				++highWaterMark;
+						if constexpr (c_generational)
+						{
+							m_data[currentIndex].generation = other.m_data[currentIndex].generation;
+						}
+					}
+				}
+				catch (...)
+				{
+					deallocate<true>(currentIndex - 1);
+
+					throw;
+				}
 			}
 		}
 
 
-		void deallocate() noexcept(std::is_nothrow_destructible_v<T>)
+		template<bool t_enableLastIndex = false>
+		void deallocate(uint32_t lastIndex = 0) noexcept
 		{
-			if (data)
+			if (m_data)
 			{
-				for (T& item : *(this))
+				for (T& element : *this)
 				{
-					item.~T();
+					element.~T();
+
+					if constexpr (t_enableLastIndex)
+					{
+						if (reinterpret_cast<Node*>(reinterpret_cast<char*>(element) - offsetof(Node, value)) - m_data >= lastIndex)
+						{
+							break;
+						}
+					}
 				}
 
-				if (!VirtualFree(data, 0, MEM_RELEASE) ||
-					!VirtualFree(skipArray, 0, MEM_RELEASE))
+				if (!VirtualFree(m_data, 0, MEM_RELEASE) ||
+					!VirtualFree(m_skipData, 0, MEM_RELEASE))
 				{
 					std::cerr << "VirtualFree failed\n";
 					std::terminate();
@@ -535,136 +697,183 @@ namespace gbr
 
 		[[nodiscard]] size_t getSkipArrayBytes() const noexcept
 		{
-			const size_t skipArrayBytes = (((pageCount * OS_PAGE_INFO::pageSize) / sizeof(Node)) + 2) * sizeof(uint32_t);
+			const size_t skipArrayBytes = (m_pageCount * OS_PAGE_INFO::pageSize / sizeof(Node) + 1) * sizeof(uint32_t);
 
 			return align(skipArrayBytes, OS_PAGE_INFO::pageSize);
 		}
 
 
-		void decommitPages(size_t index) noexcept
+		void decommitPages(uint32_t index) noexcept
 		{
 			size_t bytesUsed = (index + 1) * sizeof(Node);
 			bytesUsed = align(bytesUsed, OS_PAGE_INFO::pageSize);
-			const size_t pagesUsed = bytesUsed / OS_PAGE_INFO::pageSize;
-			const size_t bytesToDecommit = (pageCount - pagesUsed) * OS_PAGE_INFO::pageSize;
+			const uint32_t pagesUsed = bytesUsed / OS_PAGE_INFO::pageSize;
+			const size_t bytesToDecommit = (m_pageCount - pagesUsed) * OS_PAGE_INFO::pageSize;
 
 			const size_t prevSkipArrayBytes = getSkipArrayBytes();
 
-			pageCount = pagesUsed;
+			m_pageCount = pagesUsed;
 
 			const size_t skipArrayBytes = getSkipArrayBytes();
 			const size_t skipArrayBytesToDecommit = (prevSkipArrayBytes - skipArrayBytes);
 
 			if (bytesToDecommit)
 			{
-				if (!VirtualFree(reinterpret_cast<char*>(data) + bytesUsed, bytesToDecommit, MEM_DECOMMIT))
+				sm_isFull = false;
+
+				if (!VirtualFree(reinterpret_cast<char*>(m_data) + bytesUsed, bytesToDecommit, MEM_DECOMMIT))
 				{
 					goto FAIL;
 				}
 			}
 			if (skipArrayBytesToDecommit)
 			{
-				if (!VirtualFree(reinterpret_cast<char*>(skipArray) + skipArrayBytes, skipArrayBytesToDecommit, MEM_DECOMMIT))
+				if (!VirtualFree(reinterpret_cast<char*>(m_skipData) + skipArrayBytes, skipArrayBytesToDecommit, MEM_DECOMMIT))
 				{
 					goto FAIL;
 				}
 			}
 
-			endData = data + (bytesUsed / sizeof(Node));
+			m_endData = m_data + bytesUsed / sizeof(Node);
 
 			return;
 
 		FAIL:
-			std::cerr << "VirtualFree failed, Error Code: " << GetLastError() << '\n';
+			std::cerr << "VirtualFree failed\n";
 			std::terminate();
 		}
 
 
 		[[nodiscard]] Node* getAllocationSlot()
 		{
-			if (freeList)
+			FreeListIndices& freeList = getFreeListHead();
+
+			if (freeList.next)
 			{
-				FreeListNode* const prevNode = freeList->previous;
-				const uint32_t index = reinterpret_cast<Node*>(freeList) - data;
+				const uint32_t currentIndex = freeList.next;
+				const uint32_t jumpSize = m_skipData[currentIndex];
 
-				rewindSkipArray(index);
+				if (jumpSize != 1)
+				{
+					++freeList.next;
 
-				freeList = prevNode;
+					::new(&m_data[currentIndex + 1].indices) FreeListIndices(m_data[currentIndex].indices);
+					m_data[m_data[currentIndex].indices.next].indices.previous = currentIndex + 1;
 
-				return data + index;
+					m_skipData[currentIndex] = 0;
+					m_skipData[currentIndex + 1] = jumpSize - 1;
+					m_skipData[currentIndex + jumpSize - 1] = jumpSize - 1;
+				}
+				else
+				{
+					m_skipData[currentIndex] = 0;
+
+					const uint32_t nextFreeListIndex = m_data[currentIndex].indices.next;
+
+					freeList.next = nextFreeListIndex;
+					m_data[nextFreeListIndex].indices.previous = 0;
+				}
+
+				return m_data + currentIndex;
 			}
-			if (data + highWaterMark == endData)
+			else if (m_data + m_highWaterMark + 1 == m_endData)
 			{
-				grow(pageCount * 2);
+				grow(m_pageCount * 2);
 			}
 
-			++highWaterMark;
+			++m_highWaterMark;
 
-			return data + highWaterMark - 1;
+			return m_data + m_highWaterMark;
 		}
 
 
-		void grow(size_t newPageCount)
+		void grow(uint32_t newPageCount)
 		{
-			pageCount = std::min(newPageCount, reservedBytes / OS_PAGE_INFO::pageSize);
-			endData = data + (pageCount * OS_PAGE_INFO::pageSize / sizeof(Node));
-
-			if (!VirtualAlloc(data, pageCount * OS_PAGE_INFO::pageSize, MEM_COMMIT, PAGE_READWRITE) ||
-				!VirtualAlloc(skipArray, getSkipArrayBytes(), MEM_COMMIT, PAGE_READWRITE))
+			if (!sm_isFull)
 			{
-				throw std::bad_alloc();
+				const uint32_t maxPageCount = static_cast<uint32_t>(sm_reservedBytes / OS_PAGE_INFO::pageSize);
+
+				if (newPageCount >= maxPageCount)
+				{
+					sm_isFull = true;
+				}
+
+				m_pageCount = std::min(newPageCount, maxPageCount);
+				m_endData = m_data + m_pageCount * OS_PAGE_INFO::pageSize / sizeof(Node);
+
+				const bool dataCode = VirtualAlloc(m_data, (m_pageCount * OS_PAGE_INFO::pageSize), MEM_COMMIT, PAGE_READWRITE);
+				const bool skipDataCode = VirtualAlloc(m_skipData, getSkipArrayBytes(), MEM_COMMIT, PAGE_READWRITE);
+
+				if (!dataCode || !skipDataCode)
+				{
+					goto FAIL;
+				}
 			}
+
+			return;
+
+		FAIL:
+			deallocate();
+
+			throw std::bad_alloc();
 		}
 
 
-		void rewindSkipArray(uint32_t index) noexcept
+		void updateSkipArray(uint32_t currentSkipNodeIndex) noexcept
 		{
-			const uint32_t left = freeList->indices.left;
-			const uint32_t right = freeList->indices.right;
-
-			skipArray[index] = left;
-			skipArray[index + 1 - left] = left;
-
-			skipArray[index + 1] = 0;
-
-			skipArray[index + 2] = right;
-			skipArray[index + 1 + right] = right;
-		}
-
-
-		void updateSkipArray(uint32_t* currentSkipNodePtr) noexcept
-		{
-			const uint32_t leftSkipSize = currentSkipNodePtr[-1];
-			uint32_t& currentSkipNode = currentSkipNodePtr[0];
-			const uint32_t rightSkipSize = currentSkipNodePtr[1];
+			const uint32_t leftSkipSize = *(m_skipData + currentSkipNodeIndex - 1);
+			uint32_t* const currentSkipNode = m_skipData + currentSkipNodeIndex;
+			const uint32_t rightSkipSize = m_skipData[currentSkipNodeIndex + 1];
 
 			if (leftSkipSize)
 			{
 				if (rightSkipSize)
 				{
-					const uint32_t newSkipSize = leftSkipSize + rightSkipSize + 1;
+					const uint32_t totalSkipSize = leftSkipSize + rightSkipSize + 1;
 
-					currentSkipNodePtr[rightSkipSize] = newSkipSize;
-					*(currentSkipNodePtr - leftSkipSize) = newSkipSize;
+					*(currentSkipNode - leftSkipSize) = totalSkipSize;
+					*currentSkipNode = totalSkipSize;
+					currentSkipNode[rightSkipSize] = totalSkipSize;
+
+					const FreeListIndices indices = m_data[currentSkipNodeIndex + 1].indices;
+
+					m_data[indices.previous].indices.next = indices.next;
+					m_data[indices.next].indices.previous = indices.previous;
+
+					//::new(&m_data[currentSkipNodeIndex].indices) FreeListIndices{};
+					//::new(&m_data[currentSkipNodeIndex + 1].indices) FreeListIndices{};
 
 					return;
 				}
 
-				const uint32_t newSkipSize = leftSkipSize;
+				*(currentSkipNode - leftSkipSize) = leftSkipSize + 1;
+				*currentSkipNode = leftSkipSize + 1;
 
-				currentSkipNode = newSkipSize + 1;
-				*(currentSkipNodePtr - newSkipSize) = newSkipSize + 1;
+				//::new(&m_data[currentSkipNodeIndex].indices) FreeListIndices{};
 			}
 			else if (rightSkipSize)
 			{
-				const uint32_t newSkipSize = rightSkipSize;
+				*currentSkipNode = rightSkipSize + 1;
+				currentSkipNode[rightSkipSize] = rightSkipSize + 1;
 
-				currentSkipNode = newSkipSize + 1;
-				currentSkipNodePtr[newSkipSize] = newSkipSize + 1;
+				const FreeListIndices indices = m_data[currentSkipNodeIndex + 1].indices;
+
+				::new(&m_data[currentSkipNodeIndex].indices) FreeListIndices(indices);
+
+				m_data[indices.previous].indices.next = currentSkipNodeIndex;
+				m_data[indices.next].indices.previous = currentSkipNodeIndex;
 			}
 			else
 			{
-				currentSkipNode = 1;
+				*currentSkipNode = 1;
+
+				FreeListIndices& freeList = getFreeListHead();
+
+				::new(&m_data[currentSkipNodeIndex].indices) FreeListIndices{ freeList.next, 0 };
+
+				m_data[freeList.next].indices.previous = currentSkipNodeIndex;
+
+				freeList.next = currentSkipNodeIndex;
 			}
 		}
 
@@ -674,48 +883,34 @@ namespace gbr
 			return (value + alignment - 1) & ~(alignment - 1);
 		}
 
-	private: // MEMBERS
-		inline static size_t reservedBytes;
-		inline static size_t skipReservedBytes;
 
-		size_t pageCount;
-		size_t highWaterMark = 0;
-		size_t elementCount = 0;
-		Node* data;
-		Node* endData;
-		uint32_t* skipArray;
-		FreeListNode* freeList = nullptr;
-	};
-
-
-	class OS_PAGE_INFO
-	{
-		template<class, size_t, Use_Generations_Concept>
-		friend class stableVector;
-
-
-		inline static size_t pageSize;
-
-
-		static void getSystemPageData()
+		[[nodiscard]] FreeListIndices& getFreeListHead()
 		{
-			[[maybe_unused]] static const bool _ = []() noexcept -> bool
-				{
-					SYSTEM_INFO systemInfo;
-					GetSystemInfo(&systemInfo);
-					pageSize = static_cast<size_t>(systemInfo.dwPageSize);
-
-					return false;
-				}();
+			return m_data[0].indices;
 		}
+
+	private: // MEMBERS
+		inline static bool sm_isFull = false;
+		inline static size_t sm_reservedBytes;
+		inline static size_t sm_skipReservedBytes;
+
+		Node* m_data = nullptr;
+		Node* m_endData = nullptr;
+		uint32_t* m_skipData = nullptr;
+		uint32_t m_pageCount;
+		uint32_t m_highWaterMark = 0;
+		uint32_t m_size = 0;
 	};
+
+
 
 	// ITERATOR
-	template<class T, size_t elements, Use_Generations_Concept UseGenerations, Const_Iterator_Concept IsConst>
+	template<class T, size_t elements, UseGenerationsConcept UseGenerations, ConstIteratorConcept IsConst>
 	class stableVectorIterator
 	{
 	private:
-		template<class, size_t, Use_Generations_Concept>
+		template<class, size_t t_VMReserveElements, UseGenerationsConcept>
+			requires (t_VMReserveElements <= UINT32_MAX)
 		friend class stableVector;
 
 	public:
@@ -781,7 +976,7 @@ namespace gbr
 
 		[[nodiscard]] ValueType* operator->() const noexcept
 		{
-			return reinterpret_cast<ValueType*>(data);
+			return reinterpret_cast<ValueType*>(&data->value);
 		}
 
 
@@ -797,30 +992,35 @@ namespace gbr
 		SkipValueType skipPtr;
 	};
 
-	// Simplified, never needs to grow or make checks
-	template<class KeyValue>
+
+
+	// REMAP MAP, simplified, never needs to grow or make checks
+	template<class Allocator>
 	class RemapMap
 	{
 	private:
 		struct RemapNode
 		{
-			int64_t psl = -1;
-			KeyValue key = KeyValue{};
-			KeyValue value = KeyValue{};
+			int32_t psl = -1;
+			uint32_t key = 0;
+			uint32_t value = 0;
 
 			[[nodiscard]] bool isEmpty() const { return psl == -1; };
 		};
 
 	private:
+		using NodeAllocator = typename std::allocator_traits<Allocator>::template rebind_alloc<RemapNode>;
+
+	private:
 		RemapMap() noexcept = default;
 
-	public:
-		RemapMap(const RemapMap& other)
-		{
-			size = other.size;
+		RemapMap(const Allocator& alloc) noexcept : m_state(alloc) {}
 
-			data = static_cast<RemapNode*>(::operator new(other.size * sizeof(RemapNode), std::alignment_of<RemapNode>::value));
-			memcpy(data, other.data, size * sizeof(RemapNode));
+	public:
+		RemapMap(const RemapMap& other) : m_state(other.m_state)
+		{
+			m_state.data = m_state.allocate(m_state.size);
+			memcpy(m_state.data, other.m_state.data, m_state.size * sizeof(RemapNode));
 		}
 
 
@@ -828,25 +1028,23 @@ namespace gbr
 		{
 			if (this != &other)
 			{
-				::operator delete(data, size * sizeof(RemapNode), std::alignment_of<RemapNode>::value);
+				CompressedState newState = other.m_state;
+				newState.data = newState.allocate(newState.size);
 
-				size = other.size;
+				m_state.deallocate(m_state.data, m_state.size);
+				memcpy(newState.data, other.m_state.data, newState.size * sizeof(RemapNode));
 
-				data = static_cast<RemapNode*>(::operator new(other.size * sizeof(RemapNode), std::alignment_of<RemapNode>::value));
-				memcpy(data, other.data, size * sizeof(RemapNode));
+				m_state = std::move(newState);
 			}
 
 			return *this;
 		}
 
 
-		RemapMap(RemapMap&& other) noexcept
+		RemapMap(RemapMap&& other) noexcept : m_state(std::move(other.m_state))
 		{
-			data = other.data;
-			size = other.size;
-
-			other.data = nullptr;
-			other.size = 0;
+			other.m_state.data = nullptr;
+			other.m_state.size = 0;
 		}
 
 
@@ -854,13 +1052,12 @@ namespace gbr
 		{
 			if (this != &other)
 			{
-				::operator delete(data, size * sizeof(RemapNode), std::align_val_t(std::alignment_of<RemapNode>::value));
+				m_state.deallocate(m_state.data, m_state.size);
 
-				data = other.data;
-				size = other.size;
+				m_state = std::move(other.m_state);
 
-				other.data = nullptr;
-				other.size = 0;
+				other.m_state.data = nullptr;
+				other.m_state.size = 0;
 			}
 
 			return *this;
@@ -869,49 +1066,49 @@ namespace gbr
 
 		~RemapMap() noexcept
 		{
-			::operator delete(data, size * sizeof(RemapNode), std::align_val_t(std::alignment_of<RemapNode>::value));
+			m_state.deallocate(m_state.data, m_state.size);
 		}
 
 	private:
 		void allocate(size_t elementCount)
 		{
-			size = elementCount;
+			m_state.size = elementCount;
 
-			data = static_cast<RemapNode*>(::operator new(size * sizeof(RemapNode), std::align_val_t(std::alignment_of<RemapNode>::value)));
+			m_state.data = m_state.allocate(m_state.size);
 
-			for (size_t index = 0; index != size; ++index)
+			for (size_t index = 0; index != m_state.size; ++index)
 			{
-				data[index] = RemapNode{ -1, KeyValue{}, KeyValue{} };
+				m_state.data[index] = RemapNode();
 			}
 		}
 
 
-		void insert(KeyValue key, KeyValue value)
+		void insert(uint32_t key, uint32_t value) noexcept
 		{
-			size_t index = std::hash<KeyValue>()(key) & (size - 1);
-			int64_t psl = 0;
+			size_t index = std::hash<uint32_t>()(key) & (m_state.size - 1);
+			int32_t psl = 0;
 
 			while (true)
 			{
-				if (data[index].isEmpty())
+				if (m_state.data[index].isEmpty())
 				{
-					data[index].psl = psl;
-					data[index].key = key;
-					data[index].value = value;
+					m_state.data[index].psl = psl;
+					m_state.data[index].key = key;
+					m_state.data[index].value = value;
 
 					return;
 				}
-				else if (psl > data[index].psl)
+				else if (psl > m_state.data[index].psl)
 				{
-					std::swap(psl, data[index].psl);
-					std::swap(key, data[index].key);
-					std::swap(value, data[index].value);
+					std::swap(psl, m_state.data[index].psl);
+					std::swap(key, m_state.data[index].key);
+					std::swap(value, m_state.data[index].value);
 				}
 
 				++psl;
 				++index;
 
-				if (index == size)
+				if (index == m_state.size)
 				{
 					index = 0;
 				}
@@ -919,47 +1116,78 @@ namespace gbr
 		}
 
 	public:
-		[[nodiscard]] KeyValue find(KeyValue key) const
+		[[nodiscard]] uint32_t find(uint32_t key) const noexcept
 		{
-			size_t start = std::hash<KeyValue>()(key) & (size - 1);
+			const size_t start = std::hash<uint32_t>()(key) & (m_state.size - 1);
 			size_t index = start;
-			int64_t psl = 0;
+			int32_t psl = 0;
 
-			while (key != data[index].key)
+			while (key != m_state.data[index].key)
 			{
-				if (psl > data[index].psl)
+				if (psl > m_state.data[index].psl)
 				{
-					return KeyValue{};
+					return key;
 				}
 
 				++psl;
 				++index;
 
-				if (index == size)
+				if (index == m_state.size)
 				{
 					index = 0;
 				}
 				if (index == start)
 				{
-					return KeyValue{};
+					return key;
 				}
 			}
 
-			return data[index].value;
+			return m_state.data[index].value;
 		}
 
 
 		[[nodiscard]] bool isEmpty() const noexcept
 		{
-			return !size;
+			return !m_state.size;
 		}
 
 	private:
-		template<class, size_t, Use_Generations_Concept>
+		template<class, size_t t_VMReserveElements, UseGenerationsConcept>
+			requires (t_VMReserveElements <= UINT32_MAX)
 		friend class stableVector;
 
 
-		RemapNode* data = nullptr;
-		size_t size = 0;
+		struct CompressedState : public NodeAllocator
+		{
+			RemapNode* data = nullptr;
+			size_t size = 0;
+		};
+
+		CompressedState m_state;
+	};
+
+
+	// OS PAGE INFO
+	class OS_PAGE_INFO
+	{
+		template<class, size_t t_VMReserveElements, UseGenerationsConcept>
+			requires (t_VMReserveElements <= UINT32_MAX)
+		friend class stableVector;
+
+
+		inline static size_t pageSize;
+
+
+		static void getSystemPageData()
+		{
+			[[maybe_unused]] static const bool _ = []() noexcept -> bool
+				{
+					SYSTEM_INFO systemInfo;
+					GetSystemInfo(&systemInfo);
+					pageSize = static_cast<size_t>(systemInfo.dwPageSize);
+
+					return false;
+				}();
+		}
 	};
 }
