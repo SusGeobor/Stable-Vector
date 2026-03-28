@@ -841,19 +841,19 @@ namespace gbr
 
 		[[nodiscard]] const_branched_iterator cbegin_branched() const noexcept
 		{
-			return begin();
+			return begin_branched();
 		}
 
 
 		[[nodiscard]] const_branched_iterator cend_branched() const noexcept
 		{
-			return end();
+			return end_branched();
 		}
 
 
 		[[nodiscard]] const_branched_iterator cback_branched() const noexcept
 		{
-			return back();
+			return back_branched();
 		}
 
 	private: // IMPLEMENTATION
@@ -1167,7 +1167,13 @@ namespace gbr
 
 		[[nodiscard]] constexpr static Node* node_of_(T* element) noexcept
 		{
-			reinterpret_cast<Node*>(reinterpret_cast<char*>(element) - offsetof(Node, value));
+			return reinterpret_cast<Node*>(reinterpret_cast<char*>(element) - offsetof(Node, value));
+		}
+
+
+		[[nodiscard]] constexpr static const Node* node_of_(const T* element) noexcept
+		{
+			return reinterpret_cast<const Node*>(reinterpret_cast<char*>(element) - offsetof(Node, value));
 		}
 
 	private: // MEMBERS
